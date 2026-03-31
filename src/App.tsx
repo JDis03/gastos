@@ -2229,7 +2229,12 @@ function ConnectScreen({ dbx, connected, onBack, onStartOAuth, onExchangeCode, o
     setWorking(true);
     const ok = await onExchangeCode(code.trim());
     setWorking(false);
-    if(ok){ setCode(""); setStep("auth"); }
+    if(ok){
+      setCode(""); setStep("auth");
+      // Sync automático tras conectar para restaurar datos
+      await onLoadCloud();
+      onBack();
+    }
   };
 
   return (
@@ -2588,10 +2593,8 @@ function AppInner() {
   // Handle OAuth callback on load + auto-sync
   useEffect(()=>{
     if(location.search.includes("code=")){
-      // Limpiar URL residual — el nuevo flujo no usa redirect
       history.replaceState({},"",location.pathname);
     } else {
-      // Limpiar hash residual si existe
       if(location.hash) history.replaceState({},"",location.pathname);
       if(dbx.ref){
         syncCloud(true)
@@ -2601,6 +2604,19 @@ function AppInner() {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   },[]);
+
+  // Bug fix: cuando connected cambia a true (nueva conexión en la misma sesión),
+  // sincronizar para restaurar goals y recurrentes de la nube
+  const prevConnectedRef = useRef(false);
+  useEffect(()=>{
+    if(connected && !prevConnectedRef.current){
+      // acaba de conectarse en esta sesión
+      syncCloud(true)
+        .then(()=>showToast("☁️ Datos restaurados desde Dropbox","ok"))
+        .catch(()=>{});
+    }
+    prevConnectedRef.current = connected;
+  },[connected]);
 
   // Navigation helpers
   // ── NAVIGATION — solo estado React, sin browser history ────────────────────
@@ -2733,37 +2749,25 @@ function AppInner() {
         if(r2.ok){
           const md=await r2.json();
           // Archivo de settings — restaurar recurring y goals
-          // IMPORTANTE: solo cargamos de nube si local está vacío
-          // Los datos locales siempre tienen prioridad (evita sobreescribir con versión vieja)
+          // Estrategia: fusión por id en ambas direcciones
           if(f.name==="_settings.json"){
-            if(md.recurring&&Array.isArray(md.recurring)){
+            if(md.recurring&&Array.isArray(md.recurring)&&md.recurring.length>0){
               const localRec = JSON.parse(localStorage.getItem(LS.REC)||"[]");
-              if(localRec.length===0 && md.recurring.length>0){
-                // Solo restaurar si local está vacío
-                setRecurring(md.recurring);
-                localStorage.setItem(LS.REC,JSON.stringify(md.recurring));
-              } else if(localRec.length>0){
-                // Fusionar: agregar de nube los que no existen en local (por id)
-                const localIds = new Set(localRec.map(r=>r.id));
-                const merged = [...localRec, ...md.recurring.filter(r=>!localIds.has(r.id))];
-                if(merged.length !== localRec.length){
-                  setRecurring(merged);
-                  localStorage.setItem(LS.REC,JSON.stringify(merged));
-                }
+              // Fusión: local tiene prioridad para items existentes, nube aporta los que faltan
+              const localIds = new Set(localRec.map((r:Recurring)=>r.id));
+              const merged = [...localRec, ...md.recurring.filter((r:Recurring)=>!localIds.has(r.id))];
+              if(merged.length !== localRec.length || localRec.length===0){
+                setRecurring(merged);
+                localStorage.setItem(LS.REC,JSON.stringify(merged));
               }
             }
-            if(md.goals&&Array.isArray(md.goals)){
+            if(md.goals&&Array.isArray(md.goals)&&md.goals.length>0){
               const localGoals = JSON.parse(localStorage.getItem(LS.GOALS)||"[]");
-              if(localGoals.length===0 && md.goals.length>0){
-                setGoals(md.goals);
-                localStorage.setItem(LS.GOALS,JSON.stringify(md.goals));
-              } else if(localGoals.length>0){
-                const localIds = new Set(localGoals.map(g=>g.id));
-                const merged = [...localGoals, ...md.goals.filter(g=>!localIds.has(g.id))];
-                if(merged.length !== localGoals.length){
-                  setGoals(merged);
-                  localStorage.setItem(LS.GOALS,JSON.stringify(merged));
-                }
+              const localIds = new Set(localGoals.map((g:Goal)=>g.id));
+              const merged = [...localGoals, ...md.goals.filter((g:Goal)=>!localIds.has(g.id))];
+              if(merged.length !== localGoals.length || localGoals.length===0){
+                setGoals(merged);
+                localStorage.setItem(LS.GOALS,JSON.stringify(merged));
               }
             }
             continue;
